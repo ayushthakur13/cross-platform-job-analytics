@@ -13,6 +13,7 @@ import argparse
 import os
 from datetime import datetime
 import pandas as pd
+import numpy as np
 from collections import Counter
 
 DEFAULT_INPUT = os.path.join('data', 'processed', 'cleaned_jobs_dataset.csv')
@@ -49,14 +50,34 @@ def main():
     feature_cols = {}
 
     # Salary & experience numeric features (already numeric)
-    for col in ['min_salary_inr', 'max_salary_inr', 'avg_salary_inr', 'exp_min_years', 'exp_max_years']:
+    for col in ['min_salary_inr', 'max_salary_inr', 'avg_salary_inr', 'avg_salary_inr_capped', 'avg_salary_lpa', 'avg_salary_lpa_capped', 'exp_min_years', 'exp_max_years']:
         if col in df.columns:
             feature_cols[col] = df[col]
+    # Log salary features
+    if 'avg_salary_inr' in df.columns:
+        feature_cols['log_avg_salary'] = df['avg_salary_inr'].apply(lambda x: np.log1p(x) if pd.notna(x) and x > 0 else np.nan)
+    if 'avg_salary_inr_capped' in df.columns:
+        feature_cols['log_avg_salary_capped'] = df['avg_salary_inr_capped'].apply(lambda x: np.log1p(x) if pd.notna(x) and x > 0 else np.nan)
 
     # Experience level as ordinal mapping
     level_map = {'Entry': 0, 'Junior': 1, 'Mid': 2, 'Senior': 3}
     if 'experience_level' in df.columns:
         feature_cols['experience_level_code'] = df['experience_level'].map(level_map)
+
+    # Salary bands (in LPA)
+    if 'avg_salary_lpa' in df.columns:
+        def band(v):
+            if pd.isna(v):
+                return np.nan
+            if v < 3: return '<3 LPA'
+            if v < 6: return '3-6 LPA'
+            if v < 10: return '6-10 LPA'
+            if v < 20: return '10-20 LPA'
+            return '>=20 LPA'
+        bands = df['avg_salary_lpa'].apply(band)
+        dummies = pd.get_dummies(bands, prefix='salary_band', dtype=int)
+        for c in dummies.columns:
+            feature_cols[c] = dummies[c]
 
     # Categorical encodings
     # Source, job_type, location_tier
@@ -66,10 +87,10 @@ def main():
             for c in dummies.columns:
                 feature_cols[c] = dummies[c]
 
-    # Skills one-hot for top-N skills
+    # Skills one-hot for top-N skills (case-insensitive)
     for sk in top_skills:
         col_name = f"skill_{sk.replace(' ', '_').replace('/', '_')}"
-        feature_cols[col_name] = df['skills_clean'].fillna('').apply(lambda s: 1 if sk in s.split(', ') else 0)
+        feature_cols[col_name] = df['skills_clean'].fillna('').apply(lambda s, target=sk.lower(): 1 if any(p.strip().lower()==target for p in s.split(',')) else 0)
 
     # Assemble feature dataframe
     feat_df = pd.DataFrame(feature_cols)

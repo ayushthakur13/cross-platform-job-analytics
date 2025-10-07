@@ -114,6 +114,86 @@ def location_tier(city: str):
 def clean_text(x: str):
     return x.strip() if isinstance(x, str) else x
 
+# Company normalization: strip legal suffixes and collapse spaces
+LEGAL_SUFFIXES = [
+    ' private limited', ' pvt ltd', ' pvt. ltd.', ' ltd', ' limited', ' llp', ' inc', ' corp', ' corporation', ' co.', ' co', ' plc', ' gmbh'
+]
+
+def normalize_company(name: str):
+    if not isinstance(name, str):
+        return name
+    n = name.strip()
+    n_low = n.lower()
+    # remove legal suffixes
+    changed = True
+    while changed:
+        changed = False
+        for s in LEGAL_SUFFIXES:
+            if n_low.endswith(s):
+                n_low = n_low[: -len(s)]
+                changed = True
+    n = n_low.title().strip()
+    # collapse multiple spaces
+    n = re.sub(r"\s+", " ", n)
+    return n if n else None
+
+# City normalization mapping
+CITY_MAP = {
+    'bengaluru': 'Bangalore', 'bangaluru': 'Bangalore', 'delhi/ncr': 'Delhi', 'gurugram': 'Gurgaon',
+    'bombay': 'Mumbai', 'cochin': 'Kochi', 'trivandrum': 'Thiruvananthapuram', 'tvm': 'Thiruvananthapuram'
+}
+
+def normalize_city(city: str):
+    if not isinstance(city, str):
+        return city
+    c = city.strip()
+    c_low = c.lower()
+    c_std = CITY_MAP.get(c_low, c.title())
+    return c_std
+
+# Job type normalization
+JOBTYPE_MAP = {
+    'full time': 'Full-time', 'full-time': 'Full-time', 'part time': 'Part-time', 'part-time': 'Part-time',
+    'internship': 'Internship', 'contract': 'Contract', 'freelance': 'Freelance', 'remote': 'Remote'
+}
+
+def normalize_job_type(v: str):
+    if not isinstance(v, str):
+        return v
+    t = v.strip().lower()
+    return JOBTYPE_MAP.get(t, v.title())
+
+# Category normalization (lightweight)
+CATEGORY_MAP = {
+    'angular.js development': 'Angular Development',
+    'node.js development': 'Node.js Development',
+    'javascript development': 'JavaScript Development',
+    'ai': 'Artificial Intelligence (AI)'
+}
+
+def normalize_category(cat: str):
+    if not isinstance(cat, str):
+        return cat
+    c = cat.strip()
+    c_low = c.lower()
+    return CATEGORY_MAP.get(c_low, c)
+
+# Skill synonyms
+SKILL_MAP = {
+    'ml': 'Machine Learning',
+    'ai': 'Artificial Intelligence',
+    'js': 'JavaScript',
+    'node': 'Node.js',
+    'golang': 'Go',
+}
+
+def normalize_skill_token(token: str):
+    if not isinstance(token, str):
+        return token
+    t = token.strip()
+    repl = SKILL_MAP.get(t.lower())
+    return (repl or t).strip()
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -152,12 +232,36 @@ def main():
     for col in ['title', 'company', 'city', 'category_searched']:
         if col in df.columns:
             df[col + '_clean'] = df[col].apply(clean_text)
+
+    # Company normalization
+    if 'company_clean' in df.columns:
+        df['company_norm'] = df['company_clean'].apply(normalize_company)
+
+    # City normalization mapping
     if 'city_clean' in df.columns:
         df['city_clean'] = df['city_clean'].apply(lambda x: x.title() if isinstance(x, str) else x)
+        df['city_norm'] = df['city_clean'].apply(normalize_city)
+
+    # Category normalization
+    if 'category_searched_clean' in df.columns:
+        df['category_standard'] = df['category_searched_clean'].apply(normalize_category)
 
     # Skills normalization
     if 'skills' in df.columns:
         df['skills_clean'] = df['skills'].apply(normalize_skills)
+        # Map skill tokens via synonyms
+        def map_skills(s):
+            if not isinstance(s, str):
+                return s
+            items = [normalize_skill_token(p.strip()) for p in s.split(',') if p.strip()]
+            # dedupe preserving order
+            seen = set(); out = []
+            for it in items:
+                low = it.lower()
+                if low not in seen:
+                    seen.add(low); out.append(it)
+            return ', '.join(out) if out else None
+        df['skills_clean'] = df['skills_clean'].apply(map_skills)
 
     # Salary parsing
     if 'salary_text' in df.columns:
@@ -166,9 +270,25 @@ def main():
         df['max_salary_inr'] = parsed.apply(lambda x: x[1])
         df['avg_salary_inr'] = parsed.apply(lambda x: x[2])
 
-    # Experience parsing
+    # Experience parsing (with months support)
+    def parse_experience_with_months(text: str):
+        if not isinstance(text, str) or not text.strip():
+            return (None, None)
+        t = text.lower().strip()
+        # months range
+        m = re.search(r"(\d+)\s*(?:to|-|–|—)\s*(\d+)\s*month", t)
+        if m:
+            a = float(m.group(1))/12.0; b = float(m.group(2))/12.0
+            return (a, b)
+        # single months
+        m = re.search(r"(\d+)\s*month", t)
+        if m:
+            v = float(m.group(1))/12.0
+            return (v, v)
+        return parse_experience(text)
+
     if 'experience_text' in df.columns:
-        exp_parsed = df['experience_text'].apply(parse_experience)
+        exp_parsed = df['experience_text'].apply(parse_experience_with_months)
         df['exp_min_years'] = exp_parsed.apply(lambda x: x[0])
         df['exp_max_years'] = exp_parsed.apply(lambda x: x[1])
         df['experience_level'] = df.apply(lambda r: experience_level(r.get('exp_min_years'), r.get('exp_max_years')), axis=1)
@@ -178,10 +298,41 @@ def main():
     if 'posting_date_text' in df.columns:
         df['posting_date'] = df['posting_date_text'].apply(lambda x: parse_posting_date(x, ref_dt))
 
+    # Job type normalization and flags
+    if 'job_type' in df.columns:
+        df['job_type'] = df['job_type'].apply(normalize_job_type)
+        df['is_internship'] = df['job_type'].fillna('').str.contains('Internship', case=False)
+
     # Location tier
-    base_city_col = 'city_clean' if 'city_clean' in df.columns else ('city' if 'city' in df.columns else None)
+    base_city_col = 'city_norm' if 'city_norm' in df.columns else ('city_clean' if 'city_clean' in df.columns else ('city' if 'city' in df.columns else None))
     if base_city_col:
         df['location_tier'] = df[base_city_col].apply(location_tier)
+
+    # Salary LPA and capped values for robust analytics
+    if 'avg_salary_inr' in df.columns:
+        df['avg_salary_lpa'] = df['avg_salary_inr'].apply(lambda v: v/100000 if pd.notna(v) else v)
+        pos = df['avg_salary_inr'].dropna()
+        pos = pos[pos > 0]
+        if not pos.empty:
+            lo = pos.quantile(0.01)
+            hi = pos.quantile(0.99)
+            df['avg_salary_inr_capped'] = df['avg_salary_inr'].clip(lower=lo, upper=hi)
+            df['avg_salary_lpa_capped'] = df['avg_salary_inr_capped']/100000.0
+
+    # Remote flag from location_full/city
+    def detect_remote(row):
+        for col in ['location_full', base_city_col]:
+            if col in df.columns:
+                v = row.get(col)
+                if isinstance(v, str) and ('remote' in v.lower() or 'work from home' in v.lower()):
+                    return True
+        return False
+    df['has_remote'] = df.apply(detect_remote, axis=1)
+
+    # Enhanced deduplication after normalization
+    dedup_subset = [c for c in ['title_clean','company_norm','city_norm'] if c in df.columns]
+    if dedup_subset:
+        df = df.drop_duplicates(subset=dedup_subset)
 
     # Data quality flags
     for col in ['salary_text', 'skills', 'experience_text', 'description']:

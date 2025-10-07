@@ -21,7 +21,13 @@ _inr_pattern = re.compile(
     re.IGNORECASE,
 )
 
+# Additional shorthands and Indian formats
+_k_pattern = re.compile(r"(?P<min>\d+(?:\.\d+)?)\s*(?:-|to|–|—)?\s*(?P<max>\d+(?:\.\d+)?)?\s*[kK]\b\s*(?:/|per\s*)?(?P<period>month|yr|year|annum|pa)?")
+_crore_pattern = re.compile(r"(?P<min>\d+(?:\.\d+)?)\s*(?:-|to|–|—)?\s*(?P<max>\d+(?:\.\d+)?)?\s*crore(s)?", re.IGNORECASE)
+
 _single_lpa_pattern = re.compile(r"(?P<val>\d+(?:\.\d+)?)\s*(?:lpa|lac|lakh)s?", re.IGNORECASE)
+_single_k_pattern = re.compile(r"(?P<val>\d+(?:\.\d+)?)\s*[kK]\b\s*(?:/|per\s*)?(?P<period>month|yr|year|annum|pa)?")
+_single_crore_pattern = re.compile(r"(?P<val>\d+(?:\.\d+)?)\s*crore(s)?", re.IGNORECASE)
 _single_inr_pattern = re.compile(r"(?:\u20B9|rs\.?|inr)?\s*(?P<val>[\d,.]+)\s*(?:/|per\s*)?(?P<period>month|yr|year|annum|pa|day|hour)?", re.IGNORECASE)
 
 
@@ -62,8 +68,13 @@ def parse_salary_text(text: Optional[str]) -> Tuple[Optional[int], Optional[int]
     if not t:
         return (None, None, None)
 
+    # Normalize trivial tokens
+    tl = t.lower()
+    for bad in ["ctc", "per annum", "p.a.", "p.a", "pa"]:
+        tl = tl.replace(bad, " ")
+
     # Try LPA ranges first
-    m = _lpa_pattern.search(t)
+    m = _lpa_pattern.search(tl)
     if m:
         min_val = _to_number(m.group("min"))
         max_val = _to_number(m.group("max")) or min_val
@@ -73,8 +84,32 @@ def parse_salary_text(text: Optional[str]) -> Tuple[Optional[int], Optional[int]
             avg_inr = int(round((min_inr + max_inr) / 2))
             return (min_inr, max_inr, avg_inr)
 
+    # Try crore ranges
+    m = _crore_pattern.search(tl)
+    if m:
+        min_val = _to_number(m.group("min"))
+        max_val = _to_number(m.group("max")) or min_val
+        if min_val is not None and max_val is not None:
+            min_inr = int(round(min_val * 10_000_000))
+            max_inr = int(round(max_val * 10_000_000))
+            avg_inr = int(round((min_inr + max_inr) / 2))
+            return (min_inr, max_inr, avg_inr)
+
+    # Try K ranges (e.g., 20k per month)
+    m = _k_pattern.search(tl)
+    if m:
+        min_val = _to_number(m.group("min"))
+        max_val = _to_number(m.group("max")) or min_val
+        period = m.group("period")
+        mult = _period_to_year_multiplier(period)
+        if min_val is not None and max_val is not None:
+            min_inr = int(round(min_val * 1_000 * mult))
+            max_inr = int(round(max_val * 1_000 * mult))
+            avg_inr = int(round((min_inr + max_inr) / 2))
+            return (min_inr, max_inr, avg_inr)
+
     # Try INR ranges with period
-    m = _inr_pattern.search(t)
+    m = _inr_pattern.search(tl)
     if m:
         min_val = _to_number(m.group("min"))
         max_val = _to_number(m.group("max")) or min_val
@@ -87,15 +122,33 @@ def parse_salary_text(text: Optional[str]) -> Tuple[Optional[int], Optional[int]
             return (min_inr, max_inr, avg_inr)
 
     # Single LPA value
-    m = _single_lpa_pattern.search(t)
+    m = _single_lpa_pattern.search(tl)
     if m:
         v = _to_number(m.group("val"))
         if v is not None:
             val_inr = int(round(v * LAKH_VALUE))
             return (val_inr, val_inr, val_inr)
 
+    # Single crore value
+    m = _single_crore_pattern.search(tl)
+    if m:
+        v = _to_number(m.group("val"))
+        if v is not None:
+            val_inr = int(round(v * 10_000_000))
+            return (val_inr, val_inr, val_inr)
+
+    # Single K value
+    m = _single_k_pattern.search(tl)
+    if m:
+        v = _to_number(m.group("val"))
+        period = m.group("period")
+        mult = _period_to_year_multiplier(period)
+        if v is not None:
+            val_inr = int(round(v * 1_000 * mult))
+            return (val_inr, val_inr, val_inr)
+
     # Single INR value (assume annual if no period)
-    m = _single_inr_pattern.search(t)
+    m = _single_inr_pattern.search(tl)
     if m:
         v = _to_number(m.group("val"))
         period = m.group("period")
